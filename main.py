@@ -3,8 +3,8 @@ from fastapi import FastAPI, Request, HTTPException
 import httpx
 
 # 환경변수 대신 하드코딩 테스트 가능 (진짜 계정 금지!)
-BITGET_API_KEY    = "bg_ca8f75dc684e14d0812c0973f6f7b86c"
-BITGET_API_SECRET = "c42b295df6f6b090db84e02cb95db45be54693f3e66e1c9999dfed611af98cb6"
+BITGET_API_KEY    = "bg_6b62baa07b6f09eee4c5c5dfab033555"
+BITGET_API_SECRET = "1fb2ebf41c0ede17fba0bfcb109f6743e58377ec5294c5c936432f4ccdab6609"
 BITGET_PASSPHRASE = "akdlsj41"
 
 BITGET_BASE = "https://api.bitget.com"
