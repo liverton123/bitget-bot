@@ -12,9 +12,9 @@ app = FastAPI()
 API_KEY    = os.getenv("BITGET_API_KEY", "")
 API_SECRET = os.getenv("BITGET_API_SECRET", "")
 API_PASS   = os.getenv("BITGET_API_PASS", "") or os.getenv("BITGET_PASSPHRASE", "")
-PCT_EQUITY = float(os.getenv("PCT_EQUITY", "0.25"))           # 가용잔고 비율(처음 0.25 권장)
+PCT_EQUITY = float(os.getenv("PCT_EQUITY", "0.9"))           # 가용잔고 비율
 SANDBOX    = os.getenv("SANDBOX_MODE", "true").lower() == "true"
-TV_TOKEN   = os.getenv("TV_TOKEN", "")                        # 비우면 인증 생략
+TV_TOKEN   = os.getenv("TV_TOKEN", "")                        # 비워두면 인증 생략
 
 # =======================
 # CCXT 초기화
@@ -53,13 +53,16 @@ def _apply_demo_mode(mode: str):
         exchange.headers = h
 
 def _env_bootstrap():
-    """부팅 시 빠른 핑으로 모드 검증 & 필요 시 자동 전환"""
+    """
+    부팅 시 마켓 로드로 환경 검증(일부 테스트넷에서 fetch_time()이 비정상 문자열을
+    돌려주는 사례가 있어 load_markets 사용). 실패하면 모드 전환.
+    """
     if not SANDBOX:
         return
     for mode in ("header", "testnet"):
         try:
             _apply_demo_mode(mode)
-            exchange.fetch_time()
+            exchange.load_markets(reload=True)
             return
         except Exception as e:
             if mode == "testnet":
@@ -196,7 +199,7 @@ class TVPayload(BaseModel):
     price: Optional[str] = None
     time: Optional[str] = None
     tag: Optional[str] = None
-    secret: Optional[str] = None  # 본문으로도 인증 허용
+    secret: Optional[str] = None  # 본문 토큰 인증 허용
 
 def check_auth(token_from_query: str, secret_in_body: Optional[str]):
     if TV_TOKEN and (token_from_query != TV_TOKEN and secret_in_body != TV_TOKEN):
@@ -219,7 +222,7 @@ async def tv_webhook(request: Request):
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid JSON")
 
-    # Pine {{strategy.order.alert_message}} 문자열을 그대로 보낸 경우
+    # Pine {{strategy.order.alert_message}} 문자열 지원
     if isinstance(body, dict) and "strategy" in body and "order" in body["strategy"]:
         msg = body["strategy"]["order"].get("alert_message")
         if isinstance(msg, str):
@@ -228,18 +231,14 @@ async def tv_webhook(request: Request):
     payload = TVPayload(**body)
     check_auth(token, payload.secret)
 
-    # SANDBOX면 요청 시점에도 환경 보정(초기부팅 실패 대비)
-    if SANDBOX:
-        try:
-            _with_env_retry(lambda: exchange.fetch_time())
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"bitget sandbox ping failed: {e}")
-
     symbol = tv_to_ccxt_symbol(payload.symbol or "")
     act    = (payload.action or "").lower()
     side_h = (payload.side or "").lower()
 
-    # 잔고 조회(강건화 버전)
+    # (주의) /tv 요청 시엔 환경 핑 호출 제거 — 일부 테스트넷이 문자열을 반환함
+    # 대신 실제 호출들은 _with_env_retry 경유로 40099 자동 폴백 수행
+
+    # 잔고 조회(강건화)
     bal = fetch_balance_strong()
     free_usdt = pick_free_usdt(bal)
     if free_usdt <= 0:
