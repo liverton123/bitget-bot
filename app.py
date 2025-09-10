@@ -7,35 +7,35 @@ import ccxt
 
 app = FastAPI()
 
-# ===== 환경변수 =====
+# ===== ENV =====
 API_KEY    = os.getenv("BITGET_API_KEY", "")
 API_SECRET = os.getenv("BITGET_API_SECRET", "")
-API_PASS   = os.getenv("BITGET_API_PASS", "")
-PCT_EQUITY = float(os.getenv("PCT_EQUITY", "0.9"))         # 1.0 = 가용잔고 100% 사용
-SANDBOX    = os.getenv("SANDBOX_MODE", "true").lower() == "true"  # 데모(모의) 사용
-TV_TOKEN   = os.getenv("TV_TOKEN", "")                     # 비워두면 인증 생략
+# 둘 중 아무 이름으로 넣어도 읽히게
+API_PASS   = os.getenv("BITGET_API_PASS", "") or os.getenv("BITGET_PASSPHRASE", "")
+PCT_EQUITY = float(os.getenv("PCT_EQUITY", "0.25"))      # 가용잔고 비율(처음은 0.25 권장)
+SANDBOX    = os.getenv("SANDBOX_MODE", "true").lower() == "true"
+TV_TOKEN   = os.getenv("TV_TOKEN", "")                   # 비워두면 인증 패스
 
-# ===== ccxt 초기화 =====
+# ===== CCXT 초기화 =====
 cfg = {
-    "options": {"defaultType": "swap"},  # USDT-M Perpetual
+    "options": {"defaultType": "swap"},  # USDT-M perpetual
     "timeout": 15000,
     "enableRateLimit": True,
 }
 if API_KEY and API_SECRET and API_PASS:
     cfg.update({"apiKey": API_KEY, "secret": API_SECRET, "password": API_PASS})
+
 exchange = ccxt.bitget(cfg)
 
+# 데모(모의) 환경 확실 적용
 if SANDBOX:
     exchange.set_sandbox_mode(True)
-    # ▶ Bitget 테스트넷 엔드포인트를 강제로 사용
-    exchange.urls["api"] = "https://api-testnet.bitget.com"
-if SANDBOX:
-    # 데모 환경
-    exchange.set_sandbox_mode(True)
+    # Bitget 테스트넷은 이 헤더가 없으면 실환경 취급될 수 있음
+    exchange.headers = {**getattr(exchange, "headers", {}), "X-SIMULATED-TRADING": "1"}
 
 # ===== 유틸 =====
 def tv_to_ccxt_symbol(tv_symbol: str) -> str:
-    """TV 심볼(BTCUSDT.P 등)을 ccxt 심볼(BTC/USDT:USDT)로 변환"""
+    """TV 심볼(BTCUSDT.P 등) -> ccxt 심볼(BTC/USDT:USDT)"""
     if not tv_symbol:
         raise HTTPException(status_code=400, detail="symbol required")
     s = tv_symbol.upper().replace(".P", "").replace("_PERP", "").replace("PERP", "")
@@ -47,26 +47,22 @@ def tv_to_ccxt_symbol(tv_symbol: str) -> str:
     raise HTTPException(status_code=400, detail=f"Unsupported symbol: {tv_symbol}")
 
 def pick_free_usdt(balance: Dict[str, Any]) -> float:
-    """실계정=USDT, 데모=SUSDT 잔고 대응"""
-    free = 0.0
+    """실계정: USDT, 데모: SUSDT 둘 다 대응"""
     try:
         if "USDT" in balance.get("free", {}):
-            free = float(balance["free"]["USDT"])
-        elif "SUSDT" in balance.get("free", {}):
-            free = float(balance["free"]["SUSDT"])
-        else:
-            # ccxt 버전별 대응
-            for k in ("USDT", "SUSDT"):
-                if k in balance:
-                    v = balance[k]
-                    free = float(v.get("free") or v.get("total", 0) or 0)
-                    break
+            return float(balance["free"]["USDT"])
+        if "SUSDT" in balance.get("free", {}):
+            return float(balance["free"]["SUSDT"])
+        for k in ("USDT", "SUSDT"):
+            if k in balance:
+                v = balance[k]
+                return float(v.get("free") or v.get("total") or 0)
     except Exception:
-        free = 0.0
-    return free
+        pass
+    return 0.0
 
 def notional_to_amount(symbol: str, notional_usdt: float) -> float:
-    """명목가(USDT) -> 거래수량(베이스)"""
+    """명목가(USDT) -> 수량(베이스)"""
     try:
         mk = exchange.market(symbol)
         last = float(exchange.fetch_ticker(symbol)["last"])
@@ -79,7 +75,6 @@ def notional_to_amount(symbol: str, notional_usdt: float) -> float:
         amt = float(exchange.amount_to_precision(symbol, amt))
     except Exception:
         amt = float(f"{amt:.6f}")
-    # 최소 수량 체크(있으면 보정)
     try:
         min_amt = mk.get("limits", {}).get("amount", {}).get("min")
         if min_amt and amt < float(min_amt):
@@ -89,7 +84,7 @@ def notional_to_amount(symbol: str, notional_usdt: float) -> float:
     return amt
 
 def get_position_info(symbol: str) -> Dict[str, Any]:
-    """심볼 포지션 정보(사이즈/방향)"""
+    """해당 심볼 포지션(사이즈/방향)"""
     try:
         poss = exchange.fetch_positions([symbol])
     except Exception as e:
@@ -98,7 +93,6 @@ def get_position_info(symbol: str) -> Dict[str, Any]:
         if p.get("symbol") == symbol:
             size = 0.0
             side = None
-            # ccxt 버전별 다양한 필드 대응
             for k in ("contracts", "contractsSize", "size", "positionAmt"):
                 v = p.get(k)
                 if v is not None:
@@ -124,15 +118,15 @@ def place_market(symbol: str, side: str, amount: float, reduce_only: bool = Fals
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"order failed: {e}")
 
-# ===== 페이로드 =====
+# ===== 요청 모델 =====
 class TVPayload(BaseModel):
     action: str
-    side: Optional[str] = None
-    symbol: Optional[str] = None
+    side: Optional[str] = None      # "long"|"short"
+    symbol: Optional[str] = None    # 예: "BTCUSDT.P" 또는 "BTC/USDT:USDT"
     price: Optional[str] = None
     time: Optional[str] = None
     tag: Optional[str] = None
-    secret: Optional[str] = None  # 본문에 넣어도 인증 허용
+    secret: Optional[str] = None    # 본문으로도 인증 허용
 
 def check_auth(token_from_query: str, secret_in_body: Optional[str]):
     if TV_TOKEN and (token_from_query != TV_TOKEN and secret_in_body != TV_TOKEN):
@@ -152,7 +146,7 @@ async def tv_webhook(request: Request):
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid JSON")
 
-    # Pine이 {{strategy.order.alert_message}} 문자열을 보내는 경우 처리
+    # Pine에서 {{strategy.order.alert_message}} 문자열만 보낸 경우
     if isinstance(body, dict) and "strategy" in body and "order" in body["strategy"]:
         msg = body["strategy"]["order"].get("alert_message")
         if isinstance(msg, str):
@@ -162,34 +156,34 @@ async def tv_webhook(request: Request):
     check_auth(token, payload.secret)
 
     symbol = tv_to_ccxt_symbol(payload.symbol or "")
-    act = (payload.action or "").lower()
-    side_hint = (payload.side or "").lower()
+    act    = (payload.action or "").lower()
+    side_h = (payload.side or "").lower()
 
-    # 잔고 → 수량 계산
+    # 잔고 조회(선물 USDT-M)
     try:
-        bal = exchange.fetch_balance()
+        bal = exchange.fetch_balance({"productType": "USDT-FUTURES"})
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"fetch_balance failed: {e}")
+
     free_usdt = pick_free_usdt(bal)
     if free_usdt <= 0:
         raise HTTPException(status_code=400, detail="No free USDT/SUSDT in wallet")
 
     notional = free_usdt * PCT_EQUITY
-    amount = notional_to_amount(symbol, notional)
+    amount   = notional_to_amount(symbol, notional)
 
     if act == "open":
-        side = "buy" if side_hint == "long" or side_hint == "" else "sell"
+        side = "buy" if side_h in ("", "long") else "sell"
         order = place_market(symbol, side, amount, reduce_only=False)
-        return {"ok": True, "action": "open", "symbol": symbol, "amount": amount, "order": order, "env": "sandbox" if SANDBOX else "live"}
+        return {"ok": True, "action": "open", "symbol": symbol, "amount": amount, "env": "sandbox" if SANDBOX else "live", "order": order}
 
     elif act in ("close", "exit", "flat"):
         pos = get_position_info(symbol)
         if pos["size"] <= 0:
             return {"ok": True, "action": "close", "symbol": symbol, "note": "no position"}
-        # 보유 방향의 반대로 reduceOnly 주문
         close_side = "sell" if pos["side"] == "long" else "buy"
         order = place_market(symbol, close_side, pos["size"], reduce_only=True)
-        return {"ok": True, "action": "close", "symbol": symbol, "closed_size": pos["size"], "order": order, "env": "sandbox" if SANDBOX else "live"}
+        return {"ok": True, "action": "close", "symbol": symbol, "closed_size": pos["size"], "env": "sandbox" if SANDBOX else "live", "order": order}
 
     else:
         raise HTTPException(status_code=400, detail=f"unknown action: {payload.action}")
@@ -197,3 +191,14 @@ async def tv_webhook(request: Request):
 @app.get("/")
 def root():
     return {"service": "tv→bitget executor", "sandbox": SANDBOX}
+
+# 디버그(선택)
+@app.get("/debug")
+def debug():
+    return {
+        "sandbox": SANDBOX,
+        "has_key": bool(API_KEY),
+        "has_secret": bool(API_SECRET),
+        "has_pass": bool(API_PASS),
+        "headers": getattr(exchange, "headers", {}),
+    }
