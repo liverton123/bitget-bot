@@ -8,10 +8,10 @@ import ccxt
 app = FastAPI()
 
 # ===== 환경변수 =====
-API_KEY    = os.getenv("BITGET_API_KEY", "bg_6b62baa07b6f09eee4c5c5dfab033555")
-API_SECRET = os.getenv("BITGET_API_SECRET", "1fb2ebf41c0ede17fba0bfcb109f6743e58377ec5294c5c936432f4ccdab6609")
-API_PASS   = os.getenv("BITGET_API_PASS", "akdlsj41")
-PCT_EQUITY = float(os.getenv("PCT_EQUITY", "1.0"))         # 1.0 = 가용잔고 100% 사용
+API_KEY    = os.getenv("BITGET_API_KEY", "")
+API_SECRET = os.getenv("BITGET_API_SECRET", "")
+API_PASS   = os.getenv("BITGET_API_PASS", "")
+PCT_EQUITY = float(os.getenv("PCT_EQUITY", "0.9"))         # 1.0 = 가용잔고 100% 사용
 SANDBOX    = os.getenv("SANDBOX_MODE", "true").lower() == "true"  # 데모(모의) 사용
 TV_TOKEN   = os.getenv("TV_TOKEN", "")                     # 비워두면 인증 생략
 
