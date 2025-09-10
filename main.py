@@ -95,17 +95,22 @@ async def get_contract_spec(symbol_umcbl: str):
     return 0, 0.0
 
 async def get_available_equity_usdt() -> float:
-    # ✅ accounts(복수) 대신 account(단수) + marginCoin 지정
-    path = f"/api/mix/v1/account/account?productType={PRODUCT_TYPE}&marginCoin={MARGIN_COIN}"
+    # Demo 키는 private GET에도 서명 헤더 + paptrading:1 필요
+    path = f"/api/mix/v1/account/accounts?productType={PRODUCT_TYPE}"
     headers = sign("GET", path, "")
     r = await _http.get(BITGET_BASE + path, headers=headers)
     try:
         r.raise_for_status()
     except httpx.HTTPStatusError:
-        # Bitget 원문 에러를 그대로 노출
+        # Bitget 원문 에러를 그대로 노출해서 원인 확인 용이
         raise HTTPException(500, f"bitget account error {r.status_code}: {r.text}")
-    d = r.json().get("data") or {}
-    return float(d.get("availableEquity") or d.get("equity") or 0.0)
+
+    arr = r.json().get("data") or []
+    for acc in arr:
+        if acc.get("marginCoin") == MARGIN_COIN:
+            return float(acc.get("availableEquity") or acc.get("equity") or 0.0)
+
+    raise HTTPException(500, "USDT futures account not found")
 
 async def get_position_size(symbol_umcbl: str):
     path = f"/api/mix/v1/position/singlePosition?symbol={symbol_umcbl}&marginCoin={MARGIN_COIN}"
