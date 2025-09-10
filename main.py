@@ -120,13 +120,18 @@ async def get_contract_spec(symbol_umcbl: str):
     return 0, 0.0
 
 async def get_available_equity_usdt() -> float:
-    path = f"/api/mix/v1/account/accounts?productType={PRODUCT_TYPE}"
+    # ✅ accounts(복수) 대신 account(단수)로 변경 + marginCoin 명시
+    path = f"/api/mix/v1/account/account?productType={PRODUCT_TYPE}&marginCoin={MARGIN_COIN}"
     headers = sign("GET", path, "")
     r = await _http.get(BITGET_BASE + path, headers=headers)
-    r.raise_for_status()
-    for acc in r.json()["data"]:
-        if acc.get("marginCoin") == MARGIN_COIN:
-            return float(acc.get("availableEquity") or acc.get("equity") or 0.0)
+    # 400이면 오류 메시지 바디를 같이 보기 위해 예외 문구에 포함
+    try:
+        r.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(500, f"bitget account error {r.status_code}: {r.text}")
+    d = r.json().get("data") or {}
+    # availableEquity 우선, 없으면 equity 사용
+    return float(d.get("availableEquity") or d.get("equity") or 0.0)
     raise HTTPException(500, "cannot fetch USDT futures equity")
 
 async def get_position_size(symbol_umcbl: str):
