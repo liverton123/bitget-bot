@@ -29,13 +29,12 @@ exchange = ccxt.bitget(cfg)
 if SANDBOX:
     exchange.set_sandbox_mode(True)
     exchange.urls["api"] = "https://api-testnet.bitget.com"
-    # 혹시 남아있을 수 있는 헤더 제거
     h = getattr(exchange, "headers", {}) or {}
     if "X-SIMULATED-TRADING" in h:
         del h["X-SIMULATED-TRADING"]
     exchange.headers = h
 
-# 40099가 나오면 한 번은 메인+헤더로 스위칭해서 재시도
+# 40099 나오면 한 번은 다른 환경으로 스위칭 후 재시도
 def _should_flip(e: Exception) -> bool:
     s = str(e)
     return ("40099" in s) or ("environment is incorrect" in s.lower())
@@ -44,13 +43,11 @@ def _flip_env():
     if not SANDBOX:
         return
     if exchange.urls.get("api", "").startswith("https://api-testnet"):
-        # 테스트넷 -> 메인 + 시뮬헤더
         exchange.urls["api"] = "https://api.bitget.com"
         h = getattr(exchange, "headers", {}) or {}
         h["X-SIMULATED-TRADING"] = "1"
         exchange.headers = h
     else:
-        # 메인 + 헤더 -> 테스트넷
         exchange.urls["api"] = "https://api-testnet.bitget.com"
         h = getattr(exchange, "headers", {}) or {}
         if "X-SIMULATED-TRADING" in h:
@@ -65,6 +62,35 @@ def _with_env_retry(fn: Callable[[], Any]) -> Any:
             _flip_env()
             return fn()
         raise
+
+# ======= MARKETS ENSURE =======
+def ensure_markets():
+    """
+    bitget markets not loaded 에 대한 확실한 방어.
+    - load_markets(reload=False) -> 실패 시 reload=True
+    - 그래도 실패면 환경 폴백 후 재시도
+    - 마지막엔 last_http/last_resp 포함해서 이유 노출
+    """
+    last_http = getattr(exchange, "last_http_response", None)
+    last_resp = getattr(exchange, "last_response", None)
+
+    def _load(reload_flag: bool):
+        return _with_env_retry(lambda: exchange.load_markets(reload=reload_flag))
+
+    try:
+        if not getattr(exchange, "markets", None):
+            _load(False)
+        if not getattr(exchange, "markets", None):
+            _load(True)
+        if not getattr(exchange, "markets", None):
+            raise Exception("markets still empty")
+    except Exception as e:
+        last_http = getattr(exchange, "last_http_response", last_http)
+        last_resp = getattr(exchange, "last_response", last_resp)
+        raise HTTPException(
+            status_code=400,
+            detail=f"load_markets failed: {e}; last_http={last_http}; last_resp={last_resp}"
+        )
 
 # ======= UTIL =======
 def tv_to_ccxt_symbol(tv_symbol: str) -> str:
@@ -93,6 +119,7 @@ def pick_free_usdt(balance: Dict[str, Any]) -> float:
     return 0.0
 
 def notional_to_amount(symbol: str, notional_usdt: float) -> float:
+    ensure_markets()
     try:
         mk   = _with_env_retry(lambda: exchange.market(symbol))
         last = float(_with_env_retry(lambda: exchange.fetch_ticker(symbol)["last"]))
@@ -114,6 +141,7 @@ def notional_to_amount(symbol: str, notional_usdt: float) -> float:
     return amt
 
 def get_position_info(symbol: str) -> Dict[str, Any]:
+    ensure_markets()
     try:
         poss = _with_env_retry(lambda: exchange.fetch_positions([symbol]))
     except Exception as e:
@@ -136,6 +164,7 @@ def get_position_info(symbol: str) -> Dict[str, Any]:
     return {"size": 0.0, "side": None}
 
 def place_market(symbol: str, side: str, amount: float, reduce_only: bool = False):
+    ensure_markets()
     params = {"reduceOnly": reduce_only}
     try:
         if side.lower() in ("buy", "long"):
@@ -148,7 +177,7 @@ def place_market(symbol: str, side: str, amount: float, reduce_only: bool = Fals
 def fetch_balance_strong() -> Dict[str, Any]:
     """
     Bitget 테스트넷에서 잔고 호출이 종종 비정상 응답을 줄 수 있어
-    파라미터 조합을 바꿔가며 순차 폴백. 실패 시 원문 응답을 detail에 실어줌.
+    파라미터 조합을 바꿔가며 순차 폴백. 실패 시 원문 응답 detail에 포함.
     """
     combos = [
         {"type": "swap", "productType": "USDT-FUTURES", "marginCoin": "USDT"},
@@ -191,6 +220,8 @@ def check_auth(token_from_query: str, secret_in_body: Optional[str]):
 @app.post("/tv")
 async def tv_webhook(request: Request):
     token = request.query_params.get("token", "")
+
+    # JSON 파싱
     try:
         body = await request.json()
     except Exception:
@@ -211,6 +242,9 @@ async def tv_webhook(request: Request):
     act    = (payload.action or "").lower()
     side_h = (payload.side or "").lower()
 
+    # 마켓 선로드 (여기서 확실히 로드)
+    ensure_markets()
+
     # 잔고 조회(강건)
     free_usdt = 0.0
     bal_err_detail = None
@@ -220,7 +254,6 @@ async def tv_webhook(request: Request):
     except HTTPException as e:
         bal_err_detail = e.detail
 
-    # 잔고가 0이고, FALLBACK_USDT가 설정되어 있으면 임시 금액으로 진행(주문 테스트용)
     if free_usdt <= 0:
         if FALLBACK_USDT > 0:
             free_usdt = FALLBACK_USDT
@@ -263,4 +296,6 @@ def debug():
         "has_pass": bool(API_PASS),
         "headers": getattr(exchange, "headers", {}),
         "api_base": exchange.urls.get("api"),
+        "markets_loaded": bool(getattr(exchange, "markets", {})),
+        "markets_count": len(getattr(exchange, "markets", {})) if getattr(exchange, "markets", None) else 0,
     }
