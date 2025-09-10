@@ -1,19 +1,22 @@
 import hmac, hashlib, time, base64, json, math, re, asyncio
+from typing import Optional
 from fastapi import FastAPI, Request, HTTPException
 import httpx
 
-# ===== 여기에 데모(API) 키 넣기 =====
+# ==================  여기에 네 데모 API 키  ==================
 BITGET_API_KEY    = "bg_6b62baa07b6f09eee4c5c5dfab033555"
 BITGET_API_SECRET = "1fb2ebf41c0ede17fba0bfcb109f6743e58377ec5294c5c936432f4ccdab6609"
 BITGET_PASSPHRASE = "akdlsj41"
-# ===================================
+# =============================================================
 
 BITGET_BASE  = "https://api.bitget.com"   # 데모도 동일 호스트
 PRODUCT_TYPE = "USDT-FUTURES"             # v2 표기
 MARGIN_COIN  = "USDT"
-LEVERAGE     = 10                          # 풀시드 계산에 사용(거래소 레버리지는 Bitget 설정값 사용)
-USE_PCT      = 0.97                         # 잔고 97%
-COOLDOWN_SEC = 3                           # 동일 심볼 연속 신호 쿨다운
+
+# 수량 계산 파라미터 (원웨이 모드)
+LEVERAGE     = 10         # 거래소 레버리지와 맞추길 권장(여긴 '수량 계산'에만 사용)
+USE_PCT      = 0.97       # 계정 가용자산의 97%만 사용(수수료/라운딩 버퍼)
+COOLDOWN_SEC = 3          # 동일 심볼 중복 신호 쿨다운
 
 app = FastAPI()
 _http = httpx.AsyncClient(timeout=10)
@@ -22,8 +25,8 @@ _http = httpx.AsyncClient(timeout=10)
 _locks: dict[str, asyncio.Lock] = {}
 _last_hit: dict[str, float] = {}
 
-# ---------- 공통 서명(데모 헤더 필수) ----------
-def sign(method: str, path: str, body: str=""):
+# -------------------- 공통 서명 (데모 헤더 필수) --------------------
+def sign(method: str, path: str, body: str = ""):
     ts = str(int(time.time() * 1000))
     pre = ts + method.upper() + path + body
     sig = base64.b64encode(
@@ -35,10 +38,10 @@ def sign(method: str, path: str, body: str=""):
         "ACCESS-TIMESTAMP": ts,
         "ACCESS-PASSPHRASE": BITGET_PASSPHRASE,
         "Content-Type": "application/json",
-        "paptrading": "1",  # 데모 전용 헤더(실계정 전환 시 제거)
+        "paptrading": "1",  # 데모 전용 헤더 (실거래 전환 시 제거)
     }
 
-# ---------- 심볼 변환/계약 캐시 ----------
+# -------------------- 심볼 변환 & 계약 캐시 --------------------
 _contract_cache = {"when": 0.0, "data": []}
 
 async def fetch_contracts(force=False):
@@ -54,14 +57,14 @@ async def fetch_contracts(force=False):
 
 def normalize_tv_symbol(tv_sym: str) -> str:
     """
-    "BITGET:BAKEUSDT.P" / "BAKEUSDT.P" / "BAKEUSDT" 등 → "BAKEUSDT_UMCBL" 로 내부 표준화
-    (주문 보낼 때는 다시 BAKEUSDT 형식으로 변환)
+    "BITGET:BAKEUSDT.P" / "BAKEUSDT.P" / "BAKEUSDT" 등 → "BAKEUSDT_UMCBL"
+    (주문 시에는 다시 BAKEUSDT 형식으로 보냄)
     """
     if not tv_sym:
         raise HTTPException(400, "symbol missing")
     s = tv_sym.strip().upper()
     if ":" in s:
-        s = s.split(":")[1]                 # EXCHANGE:SYMBOL -> SYMBOL
+        s = s.split(":")[1]  # EXCHANGE:SYMBOL -> SYMBOL
     s = re.sub(r"\.P(ERP)?$", "", s)       # .P / .PERP 제거
     s = re.sub(r"[-_ ]?PERP(ETUAL)?", "", s)
     s = re.sub(r"\s+PERPETUAL MIX CONTRACT", "", s)
@@ -71,9 +74,9 @@ def normalize_tv_symbol(tv_sym: str) -> str:
     return f"{s}_UMCBL"
 
 async def to_bitget_symbol_best(tv_sym: str) -> str:
-    target = normalize_tv_symbol(tv_sym)         # BAKEUSDT_UMCBL
+    target = normalize_tv_symbol(tv_sym)
     contracts = await fetch_contracts()
-    symbols = {c["symbol"] for c in contracts}   # v2도 symbol 필드 제공
+    symbols = {c["symbol"] for c in contracts}
     if target in symbols:
         return target
     base = target.replace("_UMCBL", "")
@@ -82,29 +85,22 @@ async def to_bitget_symbol_best(tv_sym: str) -> str:
             return s
     raise HTTPException(400, f"cannot resolve symbol: {tv_sym}")
 
-# ---------- 시세/스펙/잔고/포지션 ----------
+# -------------------- 시세/스펙/잔고/포지션 --------------------
 async def get_ticker(symbol_umcbl: str) -> float:
-    # v2는 symbol을 BAKEUSDT 형식으로 보냄
     sym = symbol_umcbl.replace("_UMCBL", "")
     path = f"/api/v2/mix/market/ticker?productType={PRODUCT_TYPE}&symbol={sym}"
     r = await _http.get(BITGET_BASE + path)
     try:
         r.raise_for_status()
     except httpx.HTTPStatusError:
-        # 원문 에러를 그대로 노출
         raise HTTPException(500, f"bitget ticker error {r.status_code}: {r.text}")
-
     j = r.json()
     d = j.get("data")
-
-    # 케이스 1) dict 형태
     if isinstance(d, dict):
         val = d.get("lastPr") or d.get("last") or d.get("lastPrice")
         if val is None:
             raise HTTPException(500, f"unexpected ticker payload(dict): {j}")
         return float(val)
-
-    # 케이스 2) list 형태 (일부 종목/환경에서 리스트로 반환)
     if isinstance(d, list):
         if not d:
             raise HTTPException(500, f"ticker empty for {sym}: {j}")
@@ -113,10 +109,7 @@ async def get_ticker(symbol_umcbl: str) -> float:
         if val is None:
             raise HTTPException(500, f"unexpected ticker payload(list): {j}")
         return float(val)
-
-    # 그 외 예외 케이스
     raise HTTPException(500, f"unexpected ticker response: {j}")
-
 
 async def get_contract_spec(symbol_umcbl: str):
     data = await fetch_contracts()
@@ -138,17 +131,8 @@ async def get_available_equity_usdt() -> float:
     arr = r.json().get("data") or []
     for acc in arr:
         if (acc.get("marginCoin","")).upper() == "USDT":
-            # v2 응답: available(가용), accountEquity(총자산)
             return float(acc.get("available") or acc.get("accountEquity") or 0.0)
     raise HTTPException(500, "USDT futures account not found")
-
-async def get_margin_mode_for(symbol_no_suffix: str) -> str:
-    path = ("/api/v2/mix/account/account"
-            f"?symbol={symbol_no_suffix}&productType={PRODUCT_TYPE}&marginCoin={MARGIN_COIN}")
-    headers = sign("GET", path, "")
-    r = await _http.get(BITGET_BASE + path, headers=headers)
-    r.raise_for_status()
-    return (r.json().get("data") or {}).get("marginMode", "crossed")  # crossed/isolated
 
 async def get_position_size(symbol_umcbl: str):
     sym = symbol_umcbl.replace("_UMCBL","")
@@ -162,15 +146,13 @@ async def get_position_size(symbol_umcbl: str):
     for p in lst:
         if p.get("symbol") != sym:
             continue
-        side = (p.get("holdSide") or "").lower()    # long/short
+        side = (p.get("holdSide") or "").lower()
         total = float(p.get("total") or 0)
-        if side == "long":
-            long_sz = total
-        elif side == "short":
-            short_sz = total
+        if side == "long":  long_sz  = total
+        if side == "short": short_sz = total
     return long_sz, short_sz
 
-# ---------- 수량(풀시드) ----------
+# -------------------- 수량(풀시드 계산) --------------------
 def round_qty(qty: float, size_place: int, min_qty: float) -> float:
     factor = 10 ** size_place
     q = math.floor(qty * factor) / factor
@@ -184,29 +166,52 @@ async def compute_fullseed_qty(symbol_umcbl: str) -> float:
     raw_qty = notional / price
     return round_qty(raw_qty, size_place, min_qty)
 
-# ---------- 주문(v2) ----------
-async def place_order_v2(symbol_umcbl: str, side: str, trade_side: str, size: float):
+# -------------------- 주문 (v2, 원웨이 모드 기준) --------------------
+async def place_order_v2(symbol_umcbl: str, side: str, size: float, reduce_only: Optional[str] = None):
+    """
+    원웨이 모드 전용:
+      - 진입: side=buy(롱), side=sell(숏)
+      - 청산: 반대 side + reduceOnly="YES"
+      - tradeSide는 사용하지 않음
+    """
     sym = symbol_umcbl.replace("_UMCBL","")
-    margin_mode = await get_margin_mode_for(sym)  # 거래소 설정 자동 추종
     path = "/api/v2/mix/order/place-order"
-    body = {
-        "symbol": sym,
-        "productType": PRODUCT_TYPE,
-        "marginMode": margin_mode,  # crossed/isolated
-        "marginCoin": MARGIN_COIN,
-        "size": str(size),
-        "side": side,               # "buy" or "sell"
-        "tradeSide": trade_side,    # "open" or "close"
-        "orderType": "market",
-    }
-    payload = json.dumps(body, separators=(",",":"))
-    headers = sign("POST", path, payload)
-    r = await _http.post(BITGET_BASE + path, data=payload, headers=headers)
-    if r.status_code != 200:
-        raise HTTPException(500, f"bitget place error {r.status_code}: {r.text}")
-    return r.json()
 
-# ---------- 유틸 ----------
+    # 안전: 잔고/최소수량 이슈시 5%씩 줄여 최대 5회 재시도
+    size_place, min_qty = await get_contract_spec(symbol_umcbl)
+    attempt = 0
+    cur_size = size
+
+    while attempt < 5:
+        body = {
+            "symbol": sym,
+            "productType": PRODUCT_TYPE,
+            "marginMode": "crossed",     # 교차/격리는 거래소 설정을 따르지만 v2는 body에 필요
+            "marginCoin": MARGIN_COIN,
+            "size": str(cur_size),
+            "side": side,                # "buy" or "sell"
+            "orderType": "market",
+        }
+        if reduce_only:
+            body["reduceOnly"] = reduce_only  # "YES"
+
+        payload = json.dumps(body, separators=(",",":"))
+        headers = sign("POST", path, payload)
+        r = await _http.post(BITGET_BASE + path, data=payload, headers=headers)
+        if r.status_code == 200:
+            return r.json()
+
+        txt = r.text.lower()
+        if ("exceeds the balance" in txt) or ("insufficient" in txt) or ("margin" in txt):
+            attempt += 1
+            cur_size = round_qty(max(cur_size * 0.95, min_qty), size_place, min_qty)
+            continue
+
+        raise HTTPException(500, f"bitget place error {r.status_code}: {r.text}")
+
+    raise HTTPException(500, f"bitget place error: exceeded retries (last: {r.text})")
+
+# -------------------- 유틸 --------------------
 def get_lock(symbol_umcbl: str) -> asyncio.Lock:
     if symbol_umcbl not in _locks:
         _locks[symbol_umcbl] = asyncio.Lock()
@@ -220,16 +225,17 @@ def cooling(symbol_umcbl: str) -> bool:
     _last_hit[symbol_umcbl] = now
     return False
 
-# ---------- 엔드포인트 ----------
+# -------------------- 엔드포인트 --------------------
 @app.get("/")
 async def root():
-    return {"ok": True, "service": "bitget-bot", "productType": PRODUCT_TYPE}
+    return {"ok": True, "service": "bitget-bot", "mode": "one-way", "productType": PRODUCT_TYPE}
 
 @app.get("/probe/{tv_symbol}")
 async def probe(tv_symbol: str):
     s = await to_bitget_symbol_best(tv_symbol)
     qty = await compute_fullseed_qty(s)
-    return {"ok": True, "symbol": s, "fullseed_qty": qty}
+    # 주문 안 나감: 사전점검용
+    return {"ok": True, "symbol": s.replace("_UMCBL",""), "fullseed_qty": qty}
 
 @app.post("/webhook")
 async def tv_webhook(req: Request):
@@ -237,36 +243,31 @@ async def tv_webhook(req: Request):
     action = (data.get("action") or "").strip().lower()
     tv_sym = data.get("symbol")
 
-    if action not in {"enter_long", "enter_short", "exit_long", "exit_short"}:
+    if action not in {"enter_long","enter_short","exit_long","exit_short"}:
         raise HTTPException(400, f"unknown action: {action}")
 
-    symbol_umcbl = await to_bitget_symbol_best(tv_sym)  # 내부 표준
+    symbol_umcbl = await to_bitget_symbol_best(tv_sym)
     if cooling(symbol_umcbl):
         return {"ok": True, "skipped": "cooldown", "symbol": symbol_umcbl}
 
     lock = get_lock(symbol_umcbl)
     async with lock:
-        try:
-            if action == "enter_long":   # buy + open
-                qty = await compute_fullseed_qty(symbol_umcbl)
-                return await place_order_v2(symbol_umcbl, "buy", "open", qty)
+        if action == "enter_long":   # buy
+            qty = await compute_fullseed_qty(symbol_umcbl)
+            return await place_order_v2(symbol_umcbl, "buy", qty)
 
-            if action == "enter_short":  # sell + open
-                qty = await compute_fullseed_qty(symbol_umcbl)
-                return await place_order_v2(symbol_umcbl, "sell", "open", qty)
+        if action == "enter_short":  # sell
+            qty = await compute_fullseed_qty(symbol_umcbl)
+            return await place_order_v2(symbol_umcbl, "sell", qty)
 
-            if action == "exit_long":    # sell + close
-                long_sz, _ = await get_position_size(symbol_umcbl)
-                if long_sz <= 0:
-                    return {"ok": True, "msg": "no long position", "symbol": symbol_umcbl}
-                return await place_order_v2(symbol_umcbl, "sell", "close", long_sz)
+        if action == "exit_long":    # sell + reduceOnly
+            long_sz, _ = await get_position_size(symbol_umcbl)
+            if long_sz <= 0:
+                return {"ok": True, "msg": "no long position", "symbol": symbol_umcbl}
+            return await place_order_v2(symbol_umcbl, "sell", long_sz, reduce_only="YES")
 
-            if action == "exit_short":   # buy + close
-                _, short_sz = await get_position_size(symbol_umcbl)
-                if short_sz <= 0:
-                    return {"ok": True, "msg": "no short position", "symbol": symbol_umcbl}
-                return await place_order_v2(symbol_umcbl, "buy", "close", short_sz)
-
-        except HTTPException as e:
-            # Bitget 원문을 그대로 노출(디버깅 편의)
-            return {"ok": False, "error": e.detail, "action": action, "symbol": symbol_umcbl}
+        if action == "exit_short":   # buy + reduceOnly
+            _, short_sz = await get_position_size(symbol_umcbl)
+            if short_sz <= 0:
+                return {"ok": True, "msg": "no short position", "symbol": symbol_umcbl}
+            return await place_order_v2(symbol_umcbl, "buy", short_sz, reduce_only="YES")
