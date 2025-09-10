@@ -10,7 +10,7 @@ app = FastAPI()
 API_KEY    = os.getenv("BITGET_API_KEY", "")
 API_SECRET = os.getenv("BITGET_API_SECRET", "")
 API_PASS   = os.getenv("BITGET_API_PASS", "") or os.getenv("BITGET_PASSPHRASE", "")
-PCT_EQUITY = float(os.getenv("PCT_EQUITY", "0.25"))        # 가용잔고 비율
+PCT_EQUITY = float(os.getenv("PCT_EQUITY", "0.9"))        # 가용잔고 비율
 SANDBOX    = os.getenv("SANDBOX_MODE", "true").lower() == "true"
 TV_TOKEN   = os.getenv("TV_TOKEN", "")                     # 비우면 인증 생략
 FALLBACK_USDT = float(os.getenv("FALLBACK_USDT", "10"))    # 잔고조회 실패시 임시 명목가(0=사용안함)
@@ -25,7 +25,7 @@ if API_KEY and API_SECRET and API_PASS:
     cfg.update({"apiKey": API_KEY, "secret": API_SECRET, "password": API_PASS})
 exchange = ccxt.bitget(cfg)
 
-# 테스트넷 고정(헤더/메인도메인 혼선 제거)
+# 테스트넷 기본 고정
 if SANDBOX:
     exchange.set_sandbox_mode(True)
     exchange.urls["api"] = "https://api-testnet.bitget.com"
@@ -63,34 +63,54 @@ def _with_env_retry(fn: Callable[[], Any]) -> Any:
             return fn()
         raise
 
-# ======= MARKETS ENSURE =======
+# ======= MARKETS ENSURE (강화판) =======
 def ensure_markets():
     """
-    bitget markets not loaded 에 대한 확실한 방어.
-    - load_markets(reload=False) -> 실패 시 reload=True
-    - 그래도 실패면 환경 폴백 후 재시도
-    - 마지막엔 last_http/last_resp 포함해서 이유 노출
+    bitget markets not loaded 방지:
+    1) 파라미터 조합(USDT-FUTURES/umcbl/type=swap 등) 순차 시도
+    2) 실패 시 환경(테스트넷↔메인+시뮬헤더) 전환 후 동일 조합 재시도
+    3) 끝까지 실패하면 last_http/last_resp 원문 포함하여 에러 리턴
     """
+    combos = [
+        {"type": "swap", "productType": "USDT-FUTURES"},
+        {"type": "swap", "productType": "umcbl"},
+        {"type": "swap"},
+        {},
+    ]
     last_http = getattr(exchange, "last_http_response", None)
     last_resp = getattr(exchange, "last_response", None)
 
-    def _load(reload_flag: bool):
-        return _with_env_retry(lambda: exchange.load_markets(reload=reload_flag))
+    def try_load_all():
+        nonlocal last_http, last_resp
+        for params in combos:
+            try:
+                exchange.load_markets(reload=True, params=params)  # ccxt는 params를 fetch_markets에 전달
+                if getattr(exchange, "markets", None):
+                    return True
+            except Exception:
+                last_http = getattr(exchange, "last_http_response", last_http)
+                last_resp = getattr(exchange, "last_response", last_resp)
+                continue
+        return False
 
-    try:
-        if not getattr(exchange, "markets", None):
-            _load(False)
-        if not getattr(exchange, "markets", None):
-            _load(True)
-        if not getattr(exchange, "markets", None):
-            raise Exception("markets still empty")
-    except Exception as e:
-        last_http = getattr(exchange, "last_http_response", last_http)
-        last_resp = getattr(exchange, "last_response", last_resp)
-        raise HTTPException(
-            status_code=400,
-            detail=f"load_markets failed: {e}; last_http={last_http}; last_resp={last_resp}"
-        )
+    # 1차: 현재 환경에서 시도
+    if getattr(exchange, "markets", None):
+        return
+    if try_load_all():
+        return
+
+    # 2차: 환경 폴백 후 시도
+    if SANDBOX:
+        _flip_env()
+        if try_load_all():
+            return
+        # 실패 시 원래 환경으로 복귀만 해둔다(선택)
+        _flip_env()
+
+    raise HTTPException(
+        status_code=400,
+        detail=f"load_markets failed: bitget markets not loaded; last_http={last_http}; last_resp={last_resp}"
+    )
 
 # ======= UTIL =======
 def tv_to_ccxt_symbol(tv_symbol: str) -> str:
@@ -182,6 +202,7 @@ def fetch_balance_strong() -> Dict[str, Any]:
     combos = [
         {"type": "swap", "productType": "USDT-FUTURES", "marginCoin": "USDT"},
         {"type": "swap", "productType": "USDT-FUTURES"},
+        {"type": "swap", "productType": "umcbl"},
         {"type": "swap", "marginCoin": "USDT"},
         {"type": "swap"},
         {},
@@ -242,7 +263,7 @@ async def tv_webhook(request: Request):
     act    = (payload.action or "").lower()
     side_h = (payload.side or "").lower()
 
-    # 마켓 선로드 (여기서 확실히 로드)
+    # 마켓 선로드
     ensure_markets()
 
     # 잔고 조회(강건)
