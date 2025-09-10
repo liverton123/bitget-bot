@@ -22,7 +22,7 @@ _http = httpx.AsyncClient(timeout=10)
 _locks: dict[str, asyncio.Lock] = {}
 _last_hit: dict[str, float] = {}
 
-def sign(method: str, path: str, body: str=""):
+def sign(method: str, path: str, body: str = ""):
     ts = str(int(time.time() * 1000))
     pre = ts + method.upper() + path + body
     sig = base64.b64encode(
@@ -33,7 +33,9 @@ def sign(method: str, path: str, body: str=""):
         "ACCESS-SIGN": sig,
         "ACCESS-TIMESTAMP": ts,
         "ACCESS-PASSPHRASE": BITGET_PASSPHRASE,
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        # 👇 데모 트레이딩 전용 헤더 (중요)
+        "paptrading": "1",
     }
 
 # ---------- 심볼 변환 ----------
