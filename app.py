@@ -24,6 +24,11 @@ cfg = {
 if API_KEY and API_SECRET and API_PASS:
     cfg.update({"apiKey": API_KEY, "secret": API_SECRET, "password": API_PASS})
 exchange = ccxt.bitget(cfg)
+
+if SANDBOX:
+    exchange.set_sandbox_mode(True)
+    # ▶ Bitget 테스트넷 엔드포인트를 강제로 사용
+    exchange.urls["api"] = "https://api-testnet.bitget.com"
 if SANDBOX:
     # 데모 환경
     exchange.set_sandbox_mode(True)
