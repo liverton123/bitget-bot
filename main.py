@@ -12,7 +12,7 @@ BITGET_BASE  = "https://api.bitget.com"   # 데모도 동일 호스트
 PRODUCT_TYPE = "USDT-FUTURES"             # v2 표기
 MARGIN_COIN  = "USDT"
 LEVERAGE     = 10                          # 풀시드 계산에 사용(거래소 레버리지는 Bitget 설정값 사용)
-USE_PCT      = 1.0                         # 잔고 100%
+USE_PCT      = 0.97                         # 잔고 97%
 COOLDOWN_SEC = 3                           # 동일 심볼 연속 신호 쿨다운
 
 app = FastAPI()
