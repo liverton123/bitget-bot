@@ -84,11 +84,39 @@ async def to_bitget_symbol_best(tv_sym: str) -> str:
 
 # ---------- 시세/스펙/잔고/포지션 ----------
 async def get_ticker(symbol_umcbl: str) -> float:
-    sym = symbol_umcbl.replace("_UMCBL","")  # v2는 BAKEUSDT 형식
+    # v2는 symbol을 BAKEUSDT 형식으로 보냄
+    sym = symbol_umcbl.replace("_UMCBL", "")
     path = f"/api/v2/mix/market/ticker?productType={PRODUCT_TYPE}&symbol={sym}"
     r = await _http.get(BITGET_BASE + path)
-    r.raise_for_status()
-    return float(r.json()["data"]["lastPr"])
+    try:
+        r.raise_for_status()
+    except httpx.HTTPStatusError:
+        # 원문 에러를 그대로 노출
+        raise HTTPException(500, f"bitget ticker error {r.status_code}: {r.text}")
+
+    j = r.json()
+    d = j.get("data")
+
+    # 케이스 1) dict 형태
+    if isinstance(d, dict):
+        val = d.get("lastPr") or d.get("last") or d.get("lastPrice")
+        if val is None:
+            raise HTTPException(500, f"unexpected ticker payload(dict): {j}")
+        return float(val)
+
+    # 케이스 2) list 형태 (일부 종목/환경에서 리스트로 반환)
+    if isinstance(d, list):
+        if not d:
+            raise HTTPException(500, f"ticker empty for {sym}: {j}")
+        first = d[0]
+        val = first.get("lastPr") or first.get("last") or first.get("lastPrice")
+        if val is None:
+            raise HTTPException(500, f"unexpected ticker payload(list): {j}")
+        return float(val)
+
+    # 그 외 예외 케이스
+    raise HTTPException(500, f"unexpected ticker response: {j}")
+
 
 async def get_contract_spec(symbol_umcbl: str):
     data = await fetch_contracts()
