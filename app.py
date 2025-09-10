@@ -13,7 +13,7 @@ app = FastAPI()
 API_KEY    = os.getenv("BITGET_API_KEY", "")
 API_SECRET = os.getenv("BITGET_API_SECRET", "")
 API_PASS   = os.getenv("BITGET_API_PASS", "") or os.getenv("BITGET_PASSPHRASE", "")
-PCT_EQUITY = float(os.getenv("PCT_EQUITY", "0.25"))
+PCT_EQUITY = float(os.getenv("PCT_EQUITY", "0.9"))
 SANDBOX    = os.getenv("SANDBOX_MODE", "true").lower() == "true"
 TV_TOKEN   = os.getenv("TV_TOKEN", "")
 
